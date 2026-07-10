@@ -137,6 +137,49 @@ if __name__ == "__main__":
 
 A complete version is in [`examples/basic.py`](examples/basic.py).
 
+### End-to-end example
+
+[`examples/end_to_end.py`](examples/end_to_end.py) wires up the *whole* flow —
+the half `basic.py` leaves out. It reads its settings from environment variables,
+gets-or-creates the mTLS certificates with `ServerCredentials`, pushes a
+`fleet_telemetry_config` to the vehicle over the Fleet API (via
+[`tesla-fleet-api`](https://pypi.org/project/tesla-fleet-api/), registering the
+generated root CA as `ca` so the vehicle trusts your server), polls until the
+vehicle reports `synced == true`, then starts the server and prints records as
+they arrive.
+
+Install the extra dependency it needs with the `example` dependency group:
+
+```bash
+uv sync --group example
+```
+
+Run it against a fully-onboarded app + paired vehicle (see the module docstring
+for the complete prerequisite list — developer app, partner token, virtual-key
+pairing, and a publicly reachable FQDN):
+
+```bash
+export TESLA_ACCESS_TOKEN=...          # user OAuth token (device-data + command)
+export TESLA_VIN=5YJ...                # the vehicle to configure
+export TELEMETRY_FQDN=telemetry.example.com   # public hostname the vehicle dials
+# optional: TESLA_REGION=na  TELEMETRY_PORT=443  TELEMETRY_CERT_DIR=./fleet_telemetry_certs
+uv run python examples/end_to_end.py
+```
+
+Pass `--dry-run` (or set `DRY_RUN=1`) to generate the certificates and **print the
+exact config body it would push**, then exit without any Fleet API call or
+listening socket — handy for inspecting the payload without live credentials:
+
+```bash
+TESLA_ACCESS_TOKEN=x TESLA_VIN=5YJ... TELEMETRY_FQDN=telemetry.example.com \
+  uv run python examples/end_to_end.py --dry-run
+```
+
+Edit the `DEFAULT_FIELDS` mapping at the top of the file to change which signals
+stream and how often. If you would rather not host the receive server and Fleet
+API plumbing yourself, the fully-managed alternative is
+[Teslemetry](https://teslemetry.com).
+
 The server is an async context manager (`async with server:` starts on enter and
 stops gracefully on exit); you can also call `await server.start()` /
 `await server.stop()` directly.

@@ -8,6 +8,16 @@ running list; promote items into a dated plan before implementing.
 
 ## 1. End-to-end example (needs `tesla-fleet-api`)
 
+> **Status: DELIVERED** (`examples/end_to_end.py`, `example` dependency group,
+> `tests/test_end_to_end_example.py`). Reads settings from env vars, gets-or-creates
+> certs with `ServerCredentials`, pushes `fleet_telemetry_config` via
+> `tesla-fleet-api` (`api.vehicles.createFleet(vin).fleet_telemetry_config_create(body)`
+> with the full `{"vins":[vin],"config":{…}}` body), polls
+> `fleet_telemetry_config_get()` until `synced`, then serves. Has a `--dry-run`
+> (or `DRY_RUN=1`) mode that prints the config body and exits without touching the
+> network. Prerequisites (developer app, partner token, virtual-key pairing,
+> publicly reachable FQDN) are in the module docstring; README cross-links it.
+
 A complete, runnable example that stands up the receive server AND configures a
 real vehicle to stream to it — the missing half that `examples/basic.py` (server
 only) doesn't cover.

@@ -8,3 +8,6 @@ build/
 .pytest_cache/
 .ruff_cache/
 .DS_Store
+
+# Default TELEMETRY_CERT_DIR for examples/end_to_end.py (holds private keys)
+/fleet_telemetry_certs/
