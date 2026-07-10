@@ -68,6 +68,13 @@ class Record:
         with the value set in the ``Value`` oneof (``None`` if the oneof is
         unset). Returns an empty dict for any non-DATA topic, whose messages
         carry no per-signal data.
+
+        ``Field`` is a proto3 open enum, so a firmware newer than the bundled
+        proto can emit integer keys this library doesn't know. Such keys survive
+        parsing and are surfaced here under the synthetic name ``Field_<int>``
+        rather than raising, keeping this method total over untrusted input.
+
+        If a payload repeats the same field key, the last occurrence wins.
         """
         if self.topic is not Topic.DATA:
             return {}
@@ -77,7 +84,10 @@ class Record:
 
         result: dict[str, object] = {}
         for datum in message.data:
-            name = vd.Field.Name(datum.key)
+            try:
+                name = vd.Field.Name(datum.key)
+            except ValueError:
+                name = f"Field_{datum.key}"
             which = datum.value.WhichOneof("value")
             result[name] = None if which is None else getattr(datum.value, which)
         return result
@@ -98,6 +108,13 @@ def parse_record(
     that topic. ``created_at`` is epoch seconds, converted to a timezone-aware
     UTC :class:`~datetime.datetime`. ``txid`` bytes are decoded to ``str`` with
     replacement of any undecodable bytes.
+
+    This is the untrusted-bytes boundary. Only an unknown topic maps to
+    :class:`ValueError`; other malformed input propagates its native exception:
+    a malformed ``payload`` raises :class:`google.protobuf.message.DecodeError`,
+    and a ``created_at`` outside the platform's representable range raises
+    :class:`OverflowError` or :class:`OSError`. Callers are expected to guard
+    this call.
     """
     try:
         topic_enum = Topic(topic.decode(errors="replace"))

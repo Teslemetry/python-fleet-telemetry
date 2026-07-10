@@ -1,8 +1,10 @@
 """Tests for the records layer (:mod:`fleet_telemetry.records`)."""
 
+import dataclasses
 from datetime import datetime, timezone
 
 import pytest
+from google.protobuf.message import DecodeError
 from google.protobuf.timestamp_pb2 import Timestamp
 
 from fleet_telemetry.proto import (
@@ -81,6 +83,57 @@ def test_fields_unset_oneof_is_none() -> None:
     assert record.fields()["VehicleSpeed"] is None
 
 
+def test_fields_unknown_key_is_synthesized() -> None:
+    # Proto3 open enum: a firmware-new integer key survives ParseFromString and
+    # must surface under "Field_<int>" rather than crashing fields().
+    payload = vd.Payload(
+        vin=_VIN,
+        created_at=Timestamp(seconds=_EPOCH),
+        data=[vd.Datum(key=987654, value=vd.Value(float_value=1.0))],
+    )
+    record = parse_record(
+        vin=_VIN,
+        topic=b"V",
+        txid=b"tx",
+        created_at=_EPOCH,
+        payload=payload.SerializeToString(),
+    )
+    fields = record.fields()
+    assert fields["Field_987654"] == 1.0
+
+
+def test_fields_duplicate_key_last_wins() -> None:
+    payload = vd.Payload(
+        vin=_VIN,
+        created_at=Timestamp(seconds=_EPOCH),
+        data=[
+            vd.Datum(key=vd.Field.VehicleSpeed, value=vd.Value(float_value=10.0)),
+            vd.Datum(key=vd.Field.VehicleSpeed, value=vd.Value(float_value=20.0)),
+        ],
+    )
+    record = parse_record(
+        vin=_VIN,
+        topic=b"V",
+        txid=b"tx",
+        created_at=_EPOCH,
+        payload=payload.SerializeToString(),
+    )
+    assert record.fields()["VehicleSpeed"] == 20.0
+
+
+def test_malformed_payload_raises_decode_error() -> None:
+    # Untrusted-bytes boundary: a payload that isn't a valid Payload propagates
+    # DecodeError (not ValueError, which is reserved for unknown topics).
+    with pytest.raises(DecodeError):
+        parse_record(
+            vin=_VIN,
+            topic=b"V",
+            txid=b"tx",
+            created_at=_EPOCH,
+            payload=b"\xff\xff\xff\xff\xff\xff",
+        )
+
+
 def test_fields_non_data_is_empty() -> None:
     msg = va.VehicleAlerts(
         vin=_VIN,
@@ -134,6 +187,6 @@ def test_record_is_frozen() -> None:
         created_at=_EPOCH,
         payload=_data_payload(),
     )
-    with pytest.raises((AttributeError, Exception)):
+    with pytest.raises(dataclasses.FrozenInstanceError):
         record.vin = "other"  # type: ignore[misc]
     assert isinstance(record, Record)
