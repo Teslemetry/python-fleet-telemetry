@@ -100,10 +100,23 @@ The server is an async context manager (`async with server:` starts on enter and
 stops gracefully on exit); you can also call `await server.start()` /
 `await server.stop()` directly.
 
-Callbacks may be **sync or async** and each receives a single `Record`. Listener
-exceptions are isolated: a raising or hanging listener never blocks the vehicle
-(the frame is acked before any listener runs) nor the other listeners. Every
+Callbacks may be **sync or async** and each receives a single `Record`. Every
 registration method returns an **unsubscribe callable**.
+
+By design (reliable-ack=false), the current frame is always **acked to the
+vehicle before any listener runs**, so a failing or slow listener never delays or
+denies the ack for that frame. Listener **exceptions are isolated**: one raising
+listener never prevents the other listeners or the `records()` fan-out from
+receiving the record.
+
+Backpressure, however, is real and intentional: `dispatch` awaits async listeners
+inline within the per-connection read loop, so a **slow or hung async listener
+applies backpressure to processing of subsequent frames** on every connection
+that dispatches to it (listeners are shared across connections). A **hung sync
+listener blocks the whole event loop** (inherent to asyncio). Keep listeners
+fast, or offload heavy work to a task or queue. The `records()` async-iterator
+consumers are the exception: they are bounded (drop-oldest) and are **not** stalled
+by slow listeners.
 
 `server.records()` returns an independent async iterator; multiple concurrent
 iterators each receive every record. Its queue is bounded (`queue_maxsize`,
