@@ -23,6 +23,15 @@ only) doesn't cover.
 
 ## 2. Certificate tooling
 
+> **Status: DELIVERED** (`fleet_telemetry/certs.py`, `2a808ba` + `d28e5ec`).
+> `ServerCredentials(dir)` does get-or-create for a root CA + rotatable server leaf
+> (SAN=FQDN), exposes `.ca_certificate_pem` (register as `fleet_telemetry_config.ca`),
+> and `.build_ssl_context(staging=…)`. Tesla prod/eng CA bundles vendored under
+> `fleet_telemetry/certs/` and shipped in the wheel; `tesla_ca_bundle_path()` exposes
+> them. Keys `0600` in a `0700` dir; partial-CA-state raises rather than regenerating
+> the trust anchor. Remaining open items are the empirical-verification checkbox
+> below and the "where cert gen should ultimately live" question.
+
 ### Three key/cert artifacts — independent (confirm empirically)
 
 Easy to conflate; they share *purpose overlap*, not keys:
