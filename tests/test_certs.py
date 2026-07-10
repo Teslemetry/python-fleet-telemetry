@@ -95,6 +95,119 @@ def test_ensure_reissues_leaf_when_fqdn_not_covered(tmp_path: Path) -> None:
     assert "other.example.com" in san.get_values_for_type(x509.DNSName)
 
 
+def test_ensure_creates_directory_mode_0700(tmp_path: Path) -> None:
+    target = tmp_path / "creds"  # does not exist yet
+    creds = ServerCredentials(target)
+    creds.ensure(FQDN)
+    mode = stat.S_IMODE(target.stat().st_mode)
+    assert mode == 0o700, f"dir mode was {oct(mode)}"
+
+
+def test_ensure_tightens_preexisting_loose_directory(tmp_path: Path) -> None:
+    target = tmp_path / "creds"
+    target.mkdir(mode=0o755)
+    ServerCredentials(target).ensure(FQDN)
+    assert stat.S_IMODE(target.stat().st_mode) == 0o700
+
+
+# --------------------------------------------------------------------------- #
+# Partial-CA-state guard + CA-regeneration leaf coherence
+# --------------------------------------------------------------------------- #
+
+
+def test_ensure_raises_on_partial_ca_state_missing_key(tmp_path: Path) -> None:
+    creds = ServerCredentials(tmp_path)
+    creds.ensure(FQDN)
+    (tmp_path / "ca.key").unlink()
+
+    # Regenerating the trust anchor would silently invalidate every vehicle's
+    # registered `ca`; a half-present CA must raise rather than self-heal.
+    with pytest.raises(FileNotFoundError, match="partial CA state"):
+        creds.ensure(FQDN)
+
+
+def test_ensure_raises_on_partial_ca_state_missing_cert(tmp_path: Path) -> None:
+    creds = ServerCredentials(tmp_path)
+    creds.ensure(FQDN)
+    (tmp_path / "ca.pem").unlink()
+
+    with pytest.raises(FileNotFoundError, match="partial CA state"):
+        creds.ensure(FQDN)
+
+
+def test_fresh_dir_ensure_leaf_chains_to_ca(tmp_path: Path) -> None:
+    # A completely fresh directory (both CA files absent) auto-creates a CA and
+    # a leaf that cryptographically chains to it.
+    creds = ServerCredentials(tmp_path)
+    creds.ensure(FQDN)
+    ca = _load_cert(tmp_path / "ca.pem")
+    leaf = _load_cert(tmp_path / "server.pem")
+    ca_pubkey = ca.public_key()
+    assert isinstance(ca_pubkey, ec.EllipticCurvePublicKey)
+    assert leaf.signature_hash_algorithm is not None
+    ca_pubkey.verify(
+        leaf.signature,
+        leaf.tbs_certificate_bytes,
+        ec.ECDSA(leaf.signature_hash_algorithm),
+    )
+
+
+def test_full_dir_wipe_reissues_coherent_chain(tmp_path: Path) -> None:
+    # The sanctioned way to regenerate: delete BOTH CA files (a fresh dir). The
+    # leaf must then be reissued so server.pem still chains to the new ca.pem,
+    # even though the old leaf's SAN already covered the fqdn.
+    creds = ServerCredentials(tmp_path)
+    creds.ensure(FQDN)
+    (tmp_path / "ca.pem").unlink()
+    (tmp_path / "ca.key").unlink()
+
+    creds.ensure(FQDN)  # same fqdn — old leaf SAN would still "cover" it
+
+    ca = _load_cert(tmp_path / "ca.pem")
+    leaf = _load_cert(tmp_path / "server.pem")
+    assert leaf.issuer == ca.subject
+    ca_pubkey = ca.public_key()
+    assert isinstance(ca_pubkey, ec.EllipticCurvePublicKey)
+    assert leaf.signature_hash_algorithm is not None
+    ca_pubkey.verify(
+        leaf.signature,
+        leaf.tbs_certificate_bytes,
+        ec.ECDSA(leaf.signature_hash_algorithm),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# FQDN length / emptiness handling
+# --------------------------------------------------------------------------- #
+
+
+def test_long_fqdn_issues_leaf_via_san_without_cn(tmp_path: Path) -> None:
+    long_fqdn = "a" * 60 + ".example.com"  # 72 chars, > 64 CN cap
+    assert len(long_fqdn) == 72
+    creds = ServerCredentials(tmp_path)
+    creds.ensure(long_fqdn)  # must not raise
+
+    leaf = _load_cert(tmp_path / "server.pem")
+    san = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert long_fqdn in san.get_values_for_type(x509.DNSName)
+    # CN omitted because it exceeds 64 chars.
+    assert leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME) == []
+
+
+def test_short_fqdn_still_sets_cn(tmp_path: Path) -> None:
+    creds = ServerCredentials(tmp_path)
+    creds.ensure(FQDN)
+    leaf = _load_cert(tmp_path / "server.pem")
+    cn = leaf.subject.get_attributes_for_oid(NameOID.COMMON_NAME)
+    assert cn and cn[0].value == FQDN
+
+
+def test_empty_fqdn_raises_clear_error(tmp_path: Path) -> None:
+    creds = ServerCredentials(tmp_path)
+    with pytest.raises(ValueError, match="non-empty"):
+        creds.ensure("")
+
+
 # --------------------------------------------------------------------------- #
 # Structural properties + chain verification
 # --------------------------------------------------------------------------- #
@@ -110,8 +223,10 @@ def test_ca_is_a_ca(tmp_path: Path) -> None:
     ku = ca.extensions.get_extension_for_class(x509.KeyUsage).value
     assert ku.key_cert_sign is True
     assert ku.crl_sign is True
-    # SubjectKeyIdentifier is present.
-    ca.extensions.get_extension_for_class(x509.SubjectKeyIdentifier)
+    # SubjectKeyIdentifier is present, and the AKI mirrors it (RFC convention).
+    ski = ca.extensions.get_extension_for_class(x509.SubjectKeyIdentifier).value
+    aki = ca.extensions.get_extension_for_class(x509.AuthorityKeyIdentifier).value
+    assert aki.key_identifier == ski.key_identifier
 
 
 def test_leaf_structure_and_san(tmp_path: Path) -> None:
@@ -121,6 +236,10 @@ def test_leaf_structure_and_san(tmp_path: Path) -> None:
 
     bc = leaf.extensions.get_extension_for_class(x509.BasicConstraints).value
     assert bc.ca is False
+    ku = leaf.extensions.get_extension_for_class(x509.KeyUsage).value
+    assert ku.digital_signature is True
+    # EC leaf over ECDHE needs no key_encipherment; it must be off (inert/inaccurate).
+    assert ku.key_encipherment is False
     eku = leaf.extensions.get_extension_for_class(x509.ExtendedKeyUsage).value
     assert ExtendedKeyUsageOID.SERVER_AUTH in eku
     san = leaf.extensions.get_extension_for_class(x509.SubjectAlternativeName).value

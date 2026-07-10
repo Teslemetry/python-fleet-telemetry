@@ -41,6 +41,7 @@ from cryptography.hazmat.primitives.serialization import (
     Encoding,
     NoEncryption,
     PrivateFormat,
+    load_pem_private_key,
 )
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
@@ -68,8 +69,19 @@ def tesla_ca_bundle_path(*, staging: bool = False) -> pathlib.Path:
     return _CERTS_DIR / name
 
 
+#: X.509 caps a Common Name attribute at 64 characters; longer FQDNs live in
+#: the SubjectAltName only (which modern validators use exclusively anyway).
+_MAX_CN_LENGTH = 64
+
+
 def _now() -> datetime.datetime:
     return datetime.datetime.now(datetime.timezone.utc)
+
+
+def _mkdir_private(directory: pathlib.Path) -> None:
+    """Create ``directory`` if needed and force 0700 (it holds private keys)."""
+    directory.mkdir(parents=True, exist_ok=True)
+    os.chmod(directory, 0o700)
 
 
 def _write_key(path: pathlib.Path, key: ec.EllipticCurvePrivateKey) -> None:
@@ -184,17 +196,45 @@ class ServerCredentials:
 
         This performs blocking key generation and disk I/O; run it via an
         executor when called from within an event loop.
+
+        Raises :class:`FileNotFoundError` if exactly one of ``ca.pem``/``ca.key``
+        is present: regenerating the trust anchor invalidates every vehicle's
+        registered ``ca``, so it must be a deliberate act (delete the whole
+        directory), never a silent recovery from partial state.
         """
-        self._dir.mkdir(parents=True, exist_ok=True)
+        _mkdir_private(self._dir)
 
-        if not (self.ca_cert_path.exists() and self.ca_key_path.exists()):
-            self._create_ca()
+        ca_created = self._ensure_ca()
+        # A freshly (re)created CA must always be paired with a freshly issued
+        # leaf: the previous leaf, if any, was signed by a now-gone CA key and
+        # would no longer chain to the CA registered at the vehicle.
+        need_leaf = ca_created or not (
+            self.server_cert_path.exists() and self.server_key_path.exists()
+        )
+        if need_leaf or not _san_covers(_load_cert(self.server_cert_path), fqdn):
+            self._create_leaf(fqdn, ip_addresses)
 
-        if not (self.server_cert_path.exists() and self.server_key_path.exists()):
-            self._create_leaf(fqdn, ip_addresses)
-            return
-        if not _san_covers(_load_cert(self.server_cert_path), fqdn):
-            self._create_leaf(fqdn, ip_addresses)
+    def _ensure_ca(self) -> bool:
+        """Create the CA only if the directory is fresh; return whether created.
+
+        Auto-creates only when *both* CA files are absent. If exactly one is
+        present the state is corrupt and regenerating would silently invalidate
+        every vehicle's registered ``ca``, so this raises instead.
+        """
+        cert_exists = self.ca_cert_path.exists()
+        key_exists = self.ca_key_path.exists()
+        if cert_exists and key_exists:
+            return False
+        if cert_exists or key_exists:
+            raise FileNotFoundError(
+                f"partial CA state under {self._dir}: found "
+                f"{'ca.pem' if cert_exists else 'ca.key'} but not "
+                f"{'ca.key' if cert_exists else 'ca.pem'}. Regenerating the CA "
+                "invalidates every vehicle's registered `ca`; to do so "
+                "deliberately, delete the directory and call ensure() again."
+            )
+        self._create_ca()
+        return True
 
     def rotate_server_cert(
         self, fqdn: str, *, ip_addresses: Sequence[str] = ()
@@ -283,6 +323,12 @@ class ServerCredentials:
                 critical=True,
             )
             .add_extension(ski, critical=False)
+            .add_extension(
+                x509.AuthorityKeyIdentifier.from_issuer_subject_key_identifier(
+                    ski
+                ),
+                critical=False,
+            )
             .sign(key, hashes.SHA256())
         )
         _write_key(self.ca_key_path, key)
@@ -290,6 +336,8 @@ class ServerCredentials:
 
     def _create_leaf(self, fqdn: str, ip_addresses: Sequence[str]) -> None:
         """Generate and persist a server leaf signed by the existing CA."""
+        if not fqdn:
+            raise ValueError("fqdn must be a non-empty hostname or IP literal")
         ca_cert = _load_cert(self.ca_cert_path)
         ca_key = _load_ec_key(self.ca_key_path)
 
@@ -298,11 +346,17 @@ class ServerCredentials:
         ca_ski = ca_cert.extensions.get_extension_for_class(
             x509.SubjectKeyIdentifier
         ).value
+        # The Subject CN is legacy and capped at 64 chars; modern validators use
+        # the SAN (always set below) exclusively. Set the CN only when it fits,
+        # so deep subdomains / long DDNS names remain issuable.
+        subject_attrs = (
+            [x509.NameAttribute(NameOID.COMMON_NAME, fqdn)]
+            if len(fqdn) <= _MAX_CN_LENGTH
+            else []
+        )
         cert = (
             x509.CertificateBuilder()
-            .subject_name(
-                x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, fqdn)])
-            )
+            .subject_name(x509.Name(subject_attrs))
             .issuer_name(ca_cert.subject)
             .public_key(key.public_key())
             .serial_number(x509.random_serial_number())
@@ -315,7 +369,7 @@ class ServerCredentials:
                 x509.KeyUsage(
                     digital_signature=True,
                     content_commitment=False,
-                    key_encipherment=True,
+                    key_encipherment=False,
                     data_encipherment=False,
                     key_agreement=False,
                     key_cert_sign=False,
@@ -352,8 +406,6 @@ def _load_cert(path: pathlib.Path) -> x509.Certificate:
 
 
 def _load_ec_key(path: pathlib.Path) -> ec.EllipticCurvePrivateKey:
-    from cryptography.hazmat.primitives.serialization import load_pem_private_key
-
     key = load_pem_private_key(path.read_bytes(), password=None)
     if not isinstance(key, ec.EllipticCurvePrivateKey):
         raise TypeError(f"expected an EC private key at {path}")
