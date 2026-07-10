@@ -28,7 +28,7 @@ dev = ["pyright>=1.1", "pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.14"]
 include = ["fleet_telemetry*"]
 
 [tool.setuptools.package-data]
-fleet_telemetry = ["py.typed"]
+fleet_telemetry = ["py.typed", "certs/*.pem"]
 
 [tool.ruff]
 exclude = ["fleet_telemetry/proto/*", "fleet_telemetry/_flatbuffers/*"]
