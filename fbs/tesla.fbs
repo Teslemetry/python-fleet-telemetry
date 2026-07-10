@@ -1,0 +1,28 @@
+namespace tesla;
+
+table FlatbuffersStream {
+  created_at:uint32;
+  sender_id:[ubyte];
+  payload:[ubyte];
+  device_type:[ubyte];
+  device_id:[ubyte];
+  delivered_at_epoch_ms:uint64;
+}
+
+table FlatbuffersStreamAck {}
+
+// Padding tables force union tags to Stream=4, StreamAck=5 (Tesla's on-wire numbering).
+table _Pad1 {}
+table _Pad2 {}
+table _Pad3 {}
+
+union Message { _Pad1, _Pad2, _Pad3, FlatbuffersStream, FlatbuffersStreamAck }
+
+table FlatbuffersEnvelope {
+  txid:[ubyte];       // slot 0
+  topic:[ubyte];      // slot 1
+  message:Message;    // slots 2 (type) + 3 (value)
+  message_id:[ubyte]; // slot 4
+}
+
+root_type FlatbuffersEnvelope;

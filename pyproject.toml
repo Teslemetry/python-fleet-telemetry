@@ -1,0 +1,30 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools>=77.0"]
+
+[project]
+name = "python-fleet-telemetry"
+version = "0.1.0"
+license = "Apache-2.0"
+description = "Receive Tesla Fleet Telemetry directly from vehicles via event listeners"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["aiohttp>=3", "protobuf>=6.32.0", "flatbuffers>=24"]
+
+[dependency-groups]
+dev = ["pyright>=1.1", "pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.14"]
+
+[tool.setuptools.packages.find]
+include = ["fleet_telemetry*"]
+
+[tool.ruff]
+exclude = ["fleet_telemetry/proto/*", "fleet_telemetry/_flatbuffers/*"]
+
+[tool.pyright]
+include = ["fleet_telemetry"]
+typeCheckingMode = "strict"
+exclude = ["fleet_telemetry/_flatbuffers/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
