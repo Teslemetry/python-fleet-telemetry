@@ -80,62 +80,79 @@ def _root(frame: bytes) -> Any:
 
 def message_type(frame: bytes) -> int:
     """Return the union tag of ``frame`` (e.g. :data:`MESSAGE_TYPE_STREAM`)."""
-    env = _root(frame)
-    return cast(int, env.MessageType())
+    # A >=4-byte garbage buffer passes GetRootAs but blows up in the accessors,
+    # so the whole read path (not just _root) must be guarded.
+    try:
+        env = _root(frame)
+        return cast(int, env.MessageType())
+    except EnvelopeError:
+        raise
+    except Exception as exc:
+        raise EnvelopeError("failed to read envelope message type") from exc
 
 
 def decode(frame: bytes) -> StreamFrame:
     """Decode ``frame`` as a Stream envelope.
 
     Raises :class:`EnvelopeError` if the union tag is not
-    :data:`MESSAGE_TYPE_STREAM`.
+    :data:`MESSAGE_TYPE_STREAM` or if the frame is malformed.
     """
-    env = _root(frame)
-    tag = cast(int, env.MessageType())
-    if tag != MESSAGE_TYPE_STREAM:
-        raise EnvelopeError(
-            f"expected Stream (type {MESSAGE_TYPE_STREAM}), got type {tag}"
+    try:
+        env = _root(frame)
+        tag = cast(int, env.MessageType())
+        if tag != MESSAGE_TYPE_STREAM:
+            raise EnvelopeError(
+                f"expected Stream (type {MESSAGE_TYPE_STREAM}), got type {tag}"
+            )
+
+        union = env.Message()
+        if union is None:
+            raise EnvelopeError("Stream envelope has no message value")
+
+        stream = _fb.FlatbuffersStream()
+        stream.Init(union.Bytes, union.Pos)
+
+        return StreamFrame(
+            topic=_read_vector(env.Topic, cast(int, env.TopicLength())),
+            txid=_read_vector(env.Txid, cast(int, env.TxidLength())),
+            sender_id=_read_vector(stream.SenderId, cast(int, stream.SenderIdLength())),
+            device_type=_read_vector(
+                stream.DeviceType, cast(int, stream.DeviceTypeLength())
+            ),
+            device_id=_read_vector(stream.DeviceId, cast(int, stream.DeviceIdLength())),
+            payload=_read_vector(stream.Payload, cast(int, stream.PayloadLength())),
+            created_at=cast(int, stream.CreatedAt()),
+            message_id=_read_vector(env.MessageId, cast(int, env.MessageIdLength())),
         )
-
-    union = env.Message()
-    if union is None:
-        raise EnvelopeError("Stream envelope has no message value")
-
-    stream = _fb.FlatbuffersStream()
-    stream.Init(union.Bytes, union.Pos)
-
-    return StreamFrame(
-        topic=_read_vector(env.Topic, cast(int, env.TopicLength())),
-        txid=_read_vector(env.Txid, cast(int, env.TxidLength())),
-        sender_id=_read_vector(stream.SenderId, cast(int, stream.SenderIdLength())),
-        device_type=_read_vector(
-            stream.DeviceType, cast(int, stream.DeviceTypeLength())
-        ),
-        device_id=_read_vector(stream.DeviceId, cast(int, stream.DeviceIdLength())),
-        payload=_read_vector(stream.Payload, cast(int, stream.PayloadLength())),
-        created_at=cast(int, stream.CreatedAt()),
-        message_id=_read_vector(env.MessageId, cast(int, env.MessageIdLength())),
-    )
+    except EnvelopeError:
+        raise
+    except Exception as exc:  # malformed buffer that trips a field accessor
+        raise EnvelopeError("failed to decode stream frame") from exc
 
 
 def decode_ack(frame: bytes) -> AckFrame:
     """Decode ``frame`` as a StreamAck envelope.
 
     Raises :class:`EnvelopeError` if the union tag is not
-    :data:`MESSAGE_TYPE_STREAM_ACK`.
+    :data:`MESSAGE_TYPE_STREAM_ACK` or if the frame is malformed.
     """
-    env = _root(frame)
-    tag = cast(int, env.MessageType())
-    if tag != MESSAGE_TYPE_STREAM_ACK:
-        raise EnvelopeError(
-            f"expected StreamAck (type {MESSAGE_TYPE_STREAM_ACK}), got type {tag}"
-        )
+    try:
+        env = _root(frame)
+        tag = cast(int, env.MessageType())
+        if tag != MESSAGE_TYPE_STREAM_ACK:
+            raise EnvelopeError(
+                f"expected StreamAck (type {MESSAGE_TYPE_STREAM_ACK}), got type {tag}"
+            )
 
-    return AckFrame(
-        topic=_read_vector(env.Topic, cast(int, env.TopicLength())),
-        txid=_read_vector(env.Txid, cast(int, env.TxidLength())),
-        message_id=_read_vector(env.MessageId, cast(int, env.MessageIdLength())),
-    )
+        return AckFrame(
+            topic=_read_vector(env.Topic, cast(int, env.TopicLength())),
+            txid=_read_vector(env.Txid, cast(int, env.TxidLength())),
+            message_id=_read_vector(env.MessageId, cast(int, env.MessageIdLength())),
+        )
+    except EnvelopeError:
+        raise
+    except Exception as exc:  # malformed buffer that trips a field accessor
+        raise EnvelopeError("failed to decode ack frame") from exc
 
 
 def encode_ack(*, txid: bytes, topic: bytes, message_id: bytes = b"") -> bytes:

@@ -51,12 +51,29 @@ def test_decode_ack_rejects_non_ack_type():
         _envelope.decode_ack(GOLDEN_STREAM)
 
 
-@pytest.mark.parametrize("bad", [b"", b"\x00\x01\x02"])
+# Empty and truncated fail in GetRootAs; deadbeef / range(40) are >=4 bytes so
+# GetRootAs succeeds and they only blow up later in the field accessors.
+MALFORMED_FRAMES = [
+    b"",
+    b"\x00\x01\x02",
+    bytes.fromhex("deadbeef"),
+    bytes(range(40)),
+]
+
+
+@pytest.mark.parametrize("bad", MALFORMED_FRAMES)
 def test_decode_rejects_malformed_frame(bad: bytes):
     with pytest.raises(_envelope.EnvelopeError):
         _envelope.decode(bad)
 
 
-def test_message_type_rejects_malformed_frame():
+@pytest.mark.parametrize("bad", MALFORMED_FRAMES)
+def test_decode_ack_rejects_malformed_frame(bad: bytes):
     with pytest.raises(_envelope.EnvelopeError):
-        _envelope.message_type(b"")
+        _envelope.decode_ack(bad)
+
+
+@pytest.mark.parametrize("bad", MALFORMED_FRAMES)
+def test_message_type_rejects_malformed_frame(bad: bytes):
+    with pytest.raises(_envelope.EnvelopeError):
+        _envelope.message_type(bad)
