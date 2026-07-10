@@ -9,7 +9,17 @@ license = "Apache-2.0"
 description = "Receive Tesla Fleet Telemetry directly from vehicles via event listeners"
 readme = "README.md"
 requires-python = ">=3.13"
+authors = [{ name = "Brett Adams", email = "hello@teslemetry.com" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.13",
+    "Operating System :: OS Independent",
+]
 dependencies = ["aiohttp>=3", "protobuf>=6.32.0", "flatbuffers>=24"]
+
+[project.urls]
+Homepage = "https://github.com/Teslemetry/python-fleet-telemetry"
 
 [dependency-groups]
 dev = ["pyright>=1.1", "pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.14"]
@@ -17,13 +27,16 @@ dev = ["pyright>=1.1", "pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.14"]
 [tool.setuptools.packages.find]
 include = ["fleet_telemetry*"]
 
+[tool.setuptools.package-data]
+fleet_telemetry = ["py.typed"]
+
 [tool.ruff]
 exclude = ["fleet_telemetry/proto/*", "fleet_telemetry/_flatbuffers/*"]
 
 [tool.pyright]
 include = ["fleet_telemetry"]
 typeCheckingMode = "strict"
-exclude = ["fleet_telemetry/_flatbuffers/*"]
+exclude = ["fleet_telemetry/proto/*", "fleet_telemetry/_flatbuffers/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
