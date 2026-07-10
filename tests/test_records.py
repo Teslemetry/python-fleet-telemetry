@@ -89,7 +89,9 @@ def test_fields_unknown_key_is_synthesized() -> None:
     payload = vd.Payload(
         vin=_VIN,
         created_at=Timestamp(seconds=_EPOCH),
-        data=[vd.Datum(key=987654, value=vd.Value(float_value=1.0))],
+        # Deliberately an int outside the Field enum (firmware-new key); the
+        # generated stub types key as Field | str, so ignore that here.
+        data=[vd.Datum(key=987654, value=vd.Value(float_value=1.0))],  # pyright: ignore[reportArgumentType]
     )
     record = parse_record(
         vin=_VIN,

@@ -3,6 +3,8 @@
 import asyncio
 from datetime import datetime, timezone
 
+import pytest
+
 from fleet_telemetry.dispatch import Dispatcher
 from fleet_telemetry.proto import vehicle_data_pb2 as vd
 from fleet_telemetry.records import Record, Topic
@@ -226,3 +228,109 @@ async def test_queue_drop_oldest_under_maxsize_one() -> None:
     got = await asyncio.wait_for(anext(it), timeout=1)
     assert got is r2
     await it.aclose()
+
+
+async def test_empty_iterable_filter_matches_nothing() -> None:
+    disp = Dispatcher()
+    seen: list[Record] = []
+    disp.add_listener(seen.append, vin=[])
+    await disp.dispatch(data_record(vin="v1"))
+    assert seen == []
+
+
+async def test_multi_value_field_or_semantics() -> None:
+    disp = Dispatcher()
+    seen: list[Record] = []
+    # Record has only VehicleSpeed; {A, B} matches if EITHER is present.
+    disp.add_listener(seen.append, field={"Soc", "VehicleSpeed"})
+    await disp.dispatch(data_record())
+    assert len(seen) == 1
+
+
+async def test_field_filter_against_non_data_does_not_match() -> None:
+    disp = Dispatcher()
+    seen: list[Record] = []
+    # Non-DATA records have an empty fields(), so any field constraint fails.
+    disp.add_listener(seen.append, field="VehicleSpeed")
+    await disp.dispatch(alert_record())
+    assert seen == []
+
+
+async def test_concurrent_dispatch_delivers_all_records() -> None:
+    disp = Dispatcher()
+    seen: list[Record] = []
+
+    async def cb(record: Record) -> None:
+        # Yield control so the two dispatch calls genuinely interleave.
+        await asyncio.sleep(0)
+        seen.append(record)
+
+    disp.add_listener(cb)
+
+    recs = [data_record(speed=float(i)) for i in range(10)]
+    async with disp.records() as stream:
+        await asyncio.gather(*(disp.dispatch(r) for r in recs))
+
+        # Listener side: every record delivered exactly once (order not fixed).
+        assert set(id(r) for r in seen) == set(id(r) for r in recs)
+
+        # Iterator side: queue holds all 10 with no corruption.
+        got: list[Record] = []
+        for _ in range(10):
+            got.append(await asyncio.wait_for(anext(stream), timeout=1))
+        assert set(id(r) for r in got) == set(id(r) for r in recs)
+
+
+async def test_close_ends_active_iterators() -> None:
+    disp = Dispatcher()
+    it = disp.records()
+
+    async def consume() -> str:
+        try:
+            await anext(it)
+            return "record"
+        except StopAsyncIteration:
+            return "stopped"
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0)  # let the consumer park on an empty queue
+    disp.close()
+    result = await asyncio.wait_for(task, timeout=1)
+    assert result == "stopped"
+
+
+async def test_close_is_idempotent() -> None:
+    disp = Dispatcher()
+    disp.records()
+    disp.close()
+    disp.close()  # no raise
+
+
+async def test_records_after_close_is_exhausted() -> None:
+    disp = Dispatcher()
+    disp.close()
+    it = disp.records()
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(it), timeout=1)
+
+
+async def test_async_with_deregisters_queue_on_exit() -> None:
+    disp = Dispatcher()
+    async with disp.records() as stream:
+        await disp.dispatch(data_record())
+        await asyncio.wait_for(anext(stream), timeout=1)
+        assert len(disp._queues) == 1  # pyright: ignore[reportPrivateUsage]
+    # After the context exits, the queue is gone from the fan-out set.
+    assert len(disp._queues) == 0  # pyright: ignore[reportPrivateUsage]
+    # A post-close dispatch must not resurrect or grow the fan-out.
+    await disp.dispatch(data_record())
+    assert len(disp._queues) == 0  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_abandoned_iterator_cleaned_up_on_break() -> None:
+    disp = Dispatcher()
+    async with disp.records() as stream:
+        await disp.dispatch(data_record())
+        async for _record in stream:
+            break
+    assert len(disp._queues) == 0  # pyright: ignore[reportPrivateUsage]

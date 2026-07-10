@@ -34,7 +34,7 @@ fleet_telemetry = ["py.typed"]
 exclude = ["fleet_telemetry/proto/*", "fleet_telemetry/_flatbuffers/*"]
 
 [tool.pyright]
-include = ["fleet_telemetry"]
+include = ["fleet_telemetry", "tests"]
 typeCheckingMode = "strict"
 exclude = ["fleet_telemetry/proto/*", "fleet_telemetry/_flatbuffers/*"]
 
