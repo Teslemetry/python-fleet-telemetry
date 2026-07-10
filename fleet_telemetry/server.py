@@ -52,6 +52,15 @@ class _AckSink(Protocol):
     async def send_bytes(self, data: bytes) -> None: ...
 
 
+class _Message(Protocol):
+    """The subset of an :mod:`aiohttp` ``WSMessage`` the loop reads per frame."""
+
+    @property
+    def type(self) -> WSMsgType: ...
+    @property
+    def data(self) -> Any: ...
+
+
 @dataclass(frozen=True, slots=True)
 class Connection:
     """A live vehicle connection tracked by the server registry."""
@@ -85,10 +94,16 @@ class TelemetryServer:
         host: str = "0.0.0.0",
         port: int = 443,
         queue_maxsize: int = 1000,
+        shutdown_timeout: float = 5.0,
     ) -> None:
+        if ssl_context.verify_mode != ssl.CERT_REQUIRED:
+            raise ValueError(
+                "ssl_context must set verify_mode = ssl.CERT_REQUIRED for mTLS"
+            )
         self._ssl_context = ssl_context
         self._host = host
         self._port = port
+        self._shutdown_timeout = shutdown_timeout
         self._dispatcher = Dispatcher(queue_maxsize=queue_maxsize)
         self._connections: dict[str, Connection] = {}
         self._runner: web.AppRunner | None = None
@@ -171,7 +186,7 @@ class TelemetryServer:
 
     async def start(self) -> None:
         """Bind the listening socket and begin serving."""
-        self._runner = web.AppRunner(self._app)
+        self._runner = web.AppRunner(self._app, shutdown_timeout=self._shutdown_timeout)
         await self._runner.setup()
         site = web.TCPSite(
             self._runner, self._host, self._port, ssl_context=self._ssl_context
@@ -179,12 +194,20 @@ class TelemetryServer:
         await site.start()
 
     async def stop(self) -> None:
-        """Stop serving, end all record iterators, and release the socket."""
+        """Stop serving, end all record iterators, and release the socket.
+
+        The runner is cleaned up *first* so that each session's ``finally``
+        runs its disconnect dispatch while the dispatcher is still open —
+        reaching both listeners and ``records()`` iterators consistently. The
+        dispatcher is closed only afterward, to unblock any remaining parked
+        ``records()`` consumers. ``_closed`` is set up front so a connection
+        arriving during the cleanup window is rejected rather than registered.
+        """
         self._closed = True
-        self._dispatcher.close()
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
+        self._dispatcher.close()
 
     async def __aenter__(self) -> TelemetryServer:
         await self.start()
@@ -197,30 +220,47 @@ class TelemetryServer:
 
     async def _handle(self, request: web.Request) -> web.StreamResponse:
         """Terminate one vehicle's WebSocket session end to end."""
+        if self._closed:
+            return web.Response(status=503, text="server is shutting down")
+
         vin = self._authorize(request)
         if isinstance(vin, web.Response):
             return vin
 
-        ws = web.WebSocketResponse()
+        # max_msg_size makes SIZE_LIMIT authoritative: aiohttp otherwise closes
+        # frames above its 4MB default before our own check would run.
+        ws = web.WebSocketResponse(max_msg_size=SIZE_LIMIT)
         await ws.prepare(request)
 
         peer = request.remote or ""
         client_version = request.headers.get("Version")
-        await self._connect(vin, peer=peer, client_version=client_version)
+        conn = await self._connect(vin, peer=peer, client_version=client_version)
         try:
             async for msg in ws:
-                if msg.type is not WSMsgType.BINARY:
-                    continue
-                data: bytes = msg.data
-                if len(data) > SIZE_LIMIT:
-                    _LOGGER.warning(
-                        "dropping oversized frame (%d bytes) from %s", len(data), vin
-                    )
-                    continue
-                await self._process_frame(ws, vin, data)
+                await self._handle_message(ws, vin, msg)
         finally:
-            await self._disconnect(vin)
+            await self._disconnect(vin, conn)
         return ws
+
+    async def _handle_message(
+        self, ws: _AckSink, vin: str, msg: _Message
+    ) -> None:
+        """Process one inbound WebSocket message, skipping unusable ones.
+
+        Non-binary frames are ignored, and a binary frame larger than
+        :data:`SIZE_LIMIT` is dropped without tearing down the connection (a
+        belt-and-braces guard alongside the socket's ``max_msg_size``). Any
+        usable binary frame is handed to :meth:`_process_frame`.
+        """
+        if msg.type is not WSMsgType.BINARY:
+            return
+        data: bytes = msg.data
+        if len(data) > SIZE_LIMIT:
+            _LOGGER.warning(
+                "dropping oversized frame (%d bytes) from %s", len(data), vin
+            )
+            return
+        await self._process_frame(ws, vin, data)
 
     def _authorize(self, request: web.Request) -> str | web.Response:
         """Derive the VIN from the verified peer cert, or a 496 rejection.
@@ -266,7 +306,7 @@ class TelemetryServer:
         )
         try:
             await ws.send_bytes(ack)
-        except (ConnectionError, ConnectionResetError):
+        except ConnectionError:
             return
 
         try:
@@ -287,21 +327,37 @@ class TelemetryServer:
 
     async def _connect(
         self, vin: str, *, peer: str, client_version: str | None
-    ) -> None:
-        """Register a connection and dispatch a synthetic CONNECTED record."""
-        self._connections[vin] = Connection(
+    ) -> Connection:
+        """Register a connection and dispatch a synthetic CONNECTED record.
+
+        Returns the :class:`Connection` instance stored in the registry; the
+        caller holds it as a per-session token to pass to :meth:`_disconnect`,
+        so a later session for the same VIN is never torn down by an earlier
+        session's cleanup.
+        """
+        conn = Connection(
             vin=vin,
             connected_at=datetime.now(timezone.utc),
             peer=peer,
             client_version=client_version,
         )
+        self._connections[vin] = conn
         await self._dispatcher.dispatch(
             self._connectivity_record(vin, vc.ConnectivityEvent.CONNECTED)
         )
+        return conn
 
-    async def _disconnect(self, vin: str) -> None:
-        """Deregister a connection and dispatch a synthetic DISCONNECTED record."""
-        self._connections.pop(vin, None)
+    async def _disconnect(self, vin: str, conn: Connection) -> None:
+        """Deregister ``conn`` and dispatch a synthetic DISCONNECTED record.
+
+        Only acts if ``conn`` is still the live registry entry for ``vin``. If a
+        newer session has already replaced it (a same-VIN reconnect), this is a
+        no-op: neither the newer connection is removed nor a spurious
+        DISCONNECTED emitted.
+        """
+        if self._connections.get(vin) is not conn:
+            return
+        del self._connections[vin]
         await self._dispatcher.dispatch(
             self._connectivity_record(vin, vc.ConnectivityEvent.DISCONNECTED)
         )
