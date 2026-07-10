@@ -23,6 +23,30 @@ only) doesn't cover.
 
 ## 2. Certificate tooling
 
+### Three key/cert artifacts — independent (confirm empirically)
+
+Easy to conflate; they share *purpose overlap*, not keys:
+1. **App / partner EC private key** (`prime256v1`, public half hosted at
+   `/.well-known/appspecific/com.tesla.3p.public-key.pem`). Used for the partner
+   token, virtual-key pairing, and **signing the `fleet_telemetry_config` delivery**
+   to virtual-key vehicles (the JWT/command signing).
+2. **Telemetry CA + server cert** (the `ca` field in `fleet_telemetry_config`).
+   Self-signed is fine; the vehicle uses the CA's *public* cert to verify the
+   server's TLS leaf.
+3. **Vehicle client cert** — issued by Tesla, used for mTLS client auth.
+
+The telemetry `ca` (#2) does **NOT** need to share a private key with the app key
+(#1) or anything vehicle-side. The app key merely *signs the request that carries*
+the `ca` (authorization to change vehicle config) — no cryptographic binding to the
+CA's keypair. Reference: `fleet_telemetry_config_create` is a plain JSON POST
+(`tesla-fleet-api .../vehicle/fleet.py:731`); `ca` is documented as "the full
+certificate chain used to generate the server's TLS certificate."
+- [ ] **Verify empirically**: register a telemetry config whose `ca` is a fresh,
+      independent self-signed CA (unrelated to the app key) and confirm a vehicle
+      connects and streams. Assumed true; untested.
+
+### Tooling for the two trust directions
+
 The mTLS model has **two independent trust directions**; tooling must serve both.
 
 **Direction A — server verifies the vehicle (client-cert auth).**
